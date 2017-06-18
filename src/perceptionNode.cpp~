@@ -1,0 +1,316 @@
+#include <ros/ros.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/LaserScan.h>
+#include <opencv/cv.h>
+#include <opencv/highgui.h>
+#include <cv_bridge/cv_bridge.h>
+#include <iomanip>
+#include <kobuki_msgs/Led.h>
+#include <kobuki_msgs/SensorState.h>
+#include <sensor_msgs/Imu.h>
+
+
+using namespace cv;
+
+#define USE_X_EAST_Y_NORTH      (1)
+
+// A template method to check 'nan'
+template<typename T>
+inline bool isnan(T value)
+{
+    return value != value;
+}
+
+
+// KINECT IMAGE view ==========================================================================================
+// make a pseudo color depth
+void
+makeDepthImage(Mat &inXyz, Mat &outImage, unsigned short minDepth, unsigned short maxDepth)
+{
+	if(outImage.rows != inXyz.rows || outImage.cols != inXyz.cols || outImage.dims != CV_8UC3) {
+		outImage = Mat::zeros(inXyz.rows, inXyz.cols, CV_8UC3);
+	}
+
+	unsigned short len = maxDepth-minDepth;
+	int nTotal = inXyz.rows*inXyz.cols;
+	unsigned short *pSrc = (unsigned short*) inXyz.data;
+	unsigned char *pDst = (unsigned char*) outImage.data;
+
+	for(int i=0; i<nTotal; i++, pSrc++, pDst+=3) {
+	if(pSrc[2] == 0.) {
+		pDst[0] = 0;
+		pDst[1] = 0;
+		pDst[2] = 0;
+		//pDst[3] = 0;
+	} else {
+		int v = (int) (255*6*(1. - ((double) (maxDepth-pSrc[2]))/len));
+
+		if (v < 0)
+		v = 0;
+
+		int lb = v & 0xff;
+
+		switch (v / 256) {
+			case 0:
+				//pDst[3] = 0;
+				pDst[2] = 255;
+				pDst[1] = 255-lb;
+				pDst[0] = 255-lb;
+			break;
+			case 1:
+				//pDst[3] = 0;
+				pDst[2] = 255;
+				pDst[1] = lb;
+				pDst[0] = 0;
+			break;
+			case 2:
+				//pDst[3] = 0;
+				pDst[2] = 255-lb;
+				pDst[1] = 255;
+				pDst[0] = 0;
+			break;
+			case 3:
+				//pDst[3] = 0;
+				pDst[2] = 0;
+				pDst[1] = 255;
+				pDst[0] = lb;
+			break;
+			case 4:
+				//pDst[3] = 0;
+				pDst[2] = 0;
+				pDst[1] = 255-lb;
+				pDst[0] = 255;
+			break;
+			case 5:
+				//pDst[3] = 0;
+				pDst[2] = 0;
+				pDst[1] = 0;
+				pDst[0] = 255-lb;
+			break;
+			default:
+				//pDst[3] = 0;
+				pDst[2] = 0;
+				pDst[1] = 0;
+				pDst[0] = 0;
+			break;
+			}
+
+			if (v == 0) {
+				//pDst[3] = 0;
+				pDst[2] = 0;
+				pDst[1] = 0;
+				pDst[0] = 0;
+			}
+		}
+	}
+}
+
+// handle RGB Data. A callback function. Executed eack time a new pose message arrives.
+void poseMessageReceivedRGB(const sensor_msgs::Image& msg) {
+	ROS_INFO("seq = %d / width = %d / height = %d / step = %d", msg.header.seq, msg.width, msg.height, msg.step);
+	ROS_INFO("encoding = %s", msg.encoding.c_str());
+	//vector<unsigned char> data = msg.data;
+
+	Mat image = Mat(msg.height, msg.width, CV_8UC3);
+	memcpy(image.data, &msg.data[0], sizeof(unsigned char) * msg.data.size());
+	imshow("RGB Preview", image);
+	waitKey(30);
+}
+
+// handle Depth Data.  A callback function. Executed eack time a new pose message arrives.
+void poseMessageReceivedDepthRaw(const sensor_msgs::Image& msg) {
+	ROS_INFO("seq = %d / width = %d / height = %d / step = %d", msg.header.seq, msg.width, msg.height, msg.step);
+	ROS_INFO("encoding = %s", msg.encoding.c_str());
+	//vector<unsigned char> data = msg.data;
+
+	Mat rawDepth = Mat(msg.height, msg.width, CV_16UC1);
+	memcpy(rawDepth.data, &msg.data[0], sizeof(unsigned char) * msg.data.size());
+
+	Mat pseduoColorDepth;
+	makeDepthImage(rawDepth, pseduoColorDepth, 0, 4096);
+
+	imshow("Depth Preview", pseduoColorDepth);
+	waitKey(30);
+}
+// KINECT image view END ======================================================================================
+
+
+
+
+// KINECT LRF sensing =========================================================================================
+// LRF 데이터 (레이져 센싱) callback
+void poseMessageReceivedLRF(const sensor_msgs::LaserScan& msg)
+{
+	//ROS_INFO("angle_min = %f, angle_max = %f, angle_increment = %f", msg.angle_min, msg.angle_max, msg.angle_increment);
+	//ROS_INFO("time_increment = %f, scan_time = %f", msg.time_increment, msg.scan_time);
+	//ROS_INFO("range_min = %f, range_max = %f", msg.range_min, msg.range_max);
+	//ROS_INFO("range_count = %d, intensities_count = %d", (int)msg.ranges.size(), (int)msg.intensities.size());
+
+	// convert polar to Cartesian coordinate
+	vector<Vec2d> coord;
+	int nRangeSize = (int)msg.ranges.size();
+
+	for(int i=0; i<nRangeSize; i++) {
+		double dRange = msg.ranges[i];
+
+		if(isnan(dRange)) {
+			coord.push_back(Vec2d(0., 0.));
+		} else {
+			if(USE_X_EAST_Y_NORTH) {
+				// for Y-heading in world coordinate system (YX)
+				double dAngle = msg.angle_max - i*msg.angle_increment;
+				coord.push_back(Vec2d(dRange*sin(dAngle), dRange*cos(dAngle)));
+			} else {
+				// for X-heading in world coordinate system (XY)
+				double dAngle = msg.angle_min + i*msg.angle_increment;
+				coord.push_back(Vec2d(dRange*cos(dAngle), dRange*sin(dAngle)));
+			}
+		}
+	}
+
+
+	// draw the 'coord' in image plane
+	const int nImageSize = 801;
+	const int nImageHalfSize = nImageSize/2;
+	const int nAxisSize = nImageSize/16;
+
+	const Vec2i imageCenterCooord = Vec2i(nImageHalfSize, nImageHalfSize);
+	Mat image = Mat::zeros(nImageSize, nImageSize, CV_8UC3);
+	line(
+		image,
+		Point(imageCenterCooord[0], imageCenterCooord[1]),
+		Point(imageCenterCooord[0]+nAxisSize, imageCenterCooord[1]),
+		Scalar(0, 0, 255),
+		2
+	);
+	line(
+		image,
+		Point(imageCenterCooord[0], imageCenterCooord[1]),
+		Point(imageCenterCooord[0], imageCenterCooord[1] + nAxisSize),
+		Scalar(0, 255, 0),
+		2
+	);
+
+	for(int i=0; i<nRangeSize; i++) {
+		int x_image = imageCenterCooord[0] + cvRound((coord[i][0] / msg.range_max) * nImageHalfSize);
+		int y_image = imageCenterCooord[1] + cvRound((coord[i][1] / msg.range_max) * nImageHalfSize);
+
+		if(x_image >= 0 && x_image < nImageSize && y_image >= 0 && y_image < nImageSize) {
+			image.at<Vec3b>(y_image, x_image) = Vec3b(255, 255, 0);
+			//circle(image, Point(x_image, y_image), -1, Scalar(255, 255, 0), 2, CV_AA);
+		}
+	}
+
+	// image coordinate transformation
+	flip(image, image, 0);
+
+	imshow("Kinect LRF Preview", image);
+	waitKey(30);
+}
+// KINECT LRF sensing END =====================================================================================
+
+
+
+// TURTLEBOT Sensor ===========================================================================================
+void turtlebotSensorCallback(const kobuki_msgs::SensorState::ConstPtr& msg)
+{
+	int timeStamp = msg->time_stamp;
+	int bumper = msg->bumper;
+	int wheelDrop = msg->wheel_drop;
+	int cliff = msg->cliff;
+	int encoderLeft = msg->left_encoder;
+	int encoderRight = msg->right_encoder;
+	int pwmLeft = msg->left_pwm;
+	int pwmRight = msg->right_pwm;
+	int buttons = msg->buttons;
+	int charger = msg->charger;
+	int battery = msg->battery;
+//	int bottom = msg->bottom;
+//	int current = msg->current;
+	int overCurrent = msg->over_current;
+	int digitalInput = msg->digital_input;
+//	int analogInput = msg->analog_input;
+}
+
+void imuCallback(const sensor_msgs::Imu::ConstPtr& imusmsg)
+{
+	printf("Imu data\n");
+	printf("\tOrientation Data\n");  
+	printf("\t\tCovariance x: %e %e %e\n",
+		imusmsg->orientation_covariance[0],
+		imusmsg->orientation_covariance[1],
+		imusmsg->orientation_covariance[2]
+	);
+	printf("\t\tCovariance y: %e %e %e\n",
+		imusmsg->orientation_covariance[3],
+		imusmsg->orientation_covariance[4],
+		imusmsg->orientation_covariance[5]
+	);
+	printf("\t\tCovariance z: %e %e %e\n",
+		imusmsg->orientation_covariance[6],
+		imusmsg->orientation_covariance[7],
+		imusmsg->orientation_covariance[8]
+	);
+	printf("\tAngular velocity Data\n");  
+	printf("\t\tCovariance x: %e %e %e\n",
+		imusmsg->angular_velocity_covariance[0],
+		imusmsg->angular_velocity_covariance[1],
+		imusmsg->angular_velocity_covariance[2]
+	);
+	printf("\t\tCovariance y: %e %e %e\n",
+		imusmsg->angular_velocity_covariance[3],
+		imusmsg->angular_velocity_covariance[4],
+		imusmsg->angular_velocity_covariance[5]
+	);	
+	printf("\t\tCovariance z: %e %e %e\n",
+		imusmsg->angular_velocity_covariance[6],
+		imusmsg->angular_velocity_covariance[7],
+		imusmsg->angular_velocity_covariance[8]
+	);
+	printf("\tLinear Acceleration Data\n");  
+	printf("\t\tCovariance x: %e %e %e\n",
+		imusmsg->linear_acceleration_covariance[0],
+		imusmsg->linear_acceleration_covariance[1],
+		imusmsg->linear_acceleration_covariance[2]
+	);
+	printf("\t\tCovariance y: %e %e %e\n",
+		imusmsg->linear_acceleration_covariance[3],
+		imusmsg->linear_acceleration_covariance[4],
+		imusmsg->linear_acceleration_covariance[5]
+	);
+	printf("\t\tCovariance z: %e %e %e\n",
+		imusmsg->linear_acceleration_covariance[6],
+		imusmsg->linear_acceleration_covariance[7],
+		imusmsg->linear_acceleration_covariance[8]
+	);
+}
+// TURTLEBOT Sensor END =======================================================================================
+
+
+
+int main(int argc, char **argv)
+{
+	// Initialize the ROS system
+	ros::init(argc, argv, "perception_node");
+	ros::NodeHandle nh;
+
+	// Create a subscriber object
+	ros::Subscriber subKinectRgb = nh.subscribe(
+		"/camera/rgb/image_color", 10, &poseMessageReceivedRGB
+	);
+	ros::Subscriber subKinectDetphRaw = nh.subscribe(
+		"/camera/depth_registered/image_raw", 10, &poseMessageReceivedDepthRaw
+	);
+	ros::Subscriber subKinectLRF = nh.subscribe(
+		"/scan", 10, &poseMessageReceivedLRF
+	);
+	ros::Subscriber subTurtlebotSensors = nh.subscribe(
+		"/mobile_base/sensors/core", 100, &turtlebotSensorCallback
+	);
+//	ros::Subscriber imu = n.subscribe("/mobile_base/sensors/imu_data", 1000, imuCallback);
+
+	// Let ROS take over
+	ros::spin();
+
+	return 0;
+}

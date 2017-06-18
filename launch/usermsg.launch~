@@ -1,0 +1,4 @@
+<launch>
+	<node name="user_msg_publisher_tutorial" pkg="pacakge_folder1" type="user_msg_publisher_tutorial" output="screen"/>
+	<node name="user_msg_subscriber_tutorial" pkg="pacakge_folder1" type="user_msg_subscriber_tutorial" output="screen"/>
+</launch>
