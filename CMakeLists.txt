@@ -36,13 +36,16 @@ include_directories( ${catkin_INCLUDE_DIRS} )
 ## Declare a cpp executabl
 add_executable(actuation_node src/actuationNode.cpp)
 add_executable(perception_node src/perceptionNode.cpp)
+add_executable(cognition_node src/cognitionNode.cpp)
 
 
 ## Add cmake target dependencies of the executable/library
 add_dependencies(actuation_node no_look_pass_robot_generate_messages_cpp)
 add_dependencies(perception_node no_look_pass_robot_generate_messages_cpp)
+add_dependencies(cognition_node no_look_pass_robot_generate_messages_cpp)
 
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(actuation_node ${catkin_LIBRARIES})
 target_link_libraries(perception_node ${catkin_LIBRARIES})
+target_link_libraries(cognition_node ${catkin_LIBRARIES})
