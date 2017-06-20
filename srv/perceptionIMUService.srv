@@ -1,0 +1,5 @@
+float64[] orientationCovariance
+float64[] angularVelocityCovariance
+float64[] linearAccelerationCovariance
+---
+

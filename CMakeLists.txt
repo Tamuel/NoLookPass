@@ -13,6 +13,8 @@ find_package(catkin REQUIRED COMPONENTS
 add_message_files(
   FILES
   move.msg
+  vec2d.msg
+  laserScan.msg
 )
 
 add_service_files(

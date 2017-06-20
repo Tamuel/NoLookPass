@@ -238,7 +238,7 @@ public:
 		_sub_move = _movenh.subscribe("/move_msg", 1, &actuationSubscriber::moveMsgCallback, this);
 	}
 	
-	void spin()
+	void subscribe()
 	{
 		ros::Rate rate (30);
 		while(ros::ok())
@@ -260,7 +260,7 @@ int main(int argc, char **argv)
 
 	// Create a subscriber object
 	actuationSubscriber* subscriber = new actuationSubscriber(publisher);
-	subscriber->spin();
+	subscriber->subscribe();
 
 
 	return 0;

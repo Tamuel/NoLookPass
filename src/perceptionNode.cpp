@@ -8,11 +8,17 @@
 #include <kobuki_msgs/Led.h>
 #include <kobuki_msgs/SensorState.h>
 #include <sensor_msgs/Imu.h>
+#include <no_look_pass_robot/laserScan.h>
+#include <boost/thread/mutex.hpp>
 
 
 using namespace cv;
 
 #define USE_X_EAST_Y_NORTH      (1)
+
+bool drawLRF = true;
+vector<Vec2d> laserScanData;
+boost::mutex laserScanMutex;
 
 // A template method to check 'nan'
 template<typename T>
@@ -22,10 +28,113 @@ inline bool isnan(T value)
 }
 
 
+// Node subscriber =================================================================
+class perceptionSubscriber
+{
+private:
+	ros::NodeHandle _nh;
+
+	ros::Subscriber _subKinectRgb;
+	ros::Subscriber _subKinectDetphRaw;
+	ros::Subscriber _subKinectLRF;
+	ros::Subscriber _subTurtlebotSensors;
+	ros::Subscriber _subIMU;
+
+	void makeDepthImage(Mat &inXyz, Mat &outImage, unsigned short minDepth, unsigned short maxDepth);
+	void poseMessageReceivedRGB(const sensor_msgs::Image& msg);
+	void poseMessageReceivedDepthRaw(const sensor_msgs::Image& msg);
+	void poseMessageReceivedLRF(const sensor_msgs::LaserScan& msg);
+	void drawImage(int rangeSize, vector<Vec2d> coord, float rangeMax);
+	void turtlebotSensorCallback(const kobuki_msgs::SensorState::ConstPtr& msg);
+	void imuCallback(const sensor_msgs::Imu::ConstPtr& imusmsg);
+	
+public:
+	perceptionSubscriber()
+	{
+		// Decleation of subscriber
+		_subKinectRgb = _nh.subscribe(
+			"/camera/rgb/image_color", 10,
+			&perceptionSubscriber::poseMessageReceivedRGB, this
+		);
+		_subKinectDetphRaw = _nh.subscribe(
+			"/camera/depth_registered/image_raw", 10,
+			&perceptionSubscriber::poseMessageReceivedDepthRaw, this
+		);
+		_subKinectLRF = _nh.subscribe(
+			"/scan", 10,
+			&perceptionSubscriber::poseMessageReceivedLRF, this
+		);
+		_subTurtlebotSensors = _nh.subscribe(
+			"/mobile_base/sensors/core", 100,
+			&perceptionSubscriber::turtlebotSensorCallback, this
+		);
+//		_subIMU = _nh.subscribe(
+//			"/mobile_base/sensors/imu_data", 100,
+//			&perceptionSubscriber::imuCallback, this
+//		);
+	}
+	
+	void subscribe()
+	{
+		ros::Rate rate (30);
+		while(ros::ok())
+		{
+			ros::spinOnce();
+			rate.sleep();
+		}
+	}
+};
+
+
+// Node publisher ==================================================================
+class perceptionPublisher
+{
+private:
+	ros::NodeHandle _nh;
+	ros::Publisher _pubLaserScan;
+
+public:
+	perceptionPublisher()
+	{
+		_pubLaserScan = _nh.advertise<no_look_pass_robot::laserScan>("/laser_scan", 100, this);
+	}
+
+	void publish()
+	{
+		ros::Rate rate(10);
+
+		while(ros::ok())
+		{
+			ros::spinOnce();
+			laserScanMutex.lock(); {
+				no_look_pass_robot::laserScan scanData;
+
+				for(int i = 0; i < laserScanData.size(); i++)
+				{
+					no_look_pass_robot::vec2d vec;
+					vec.x = laserScanData[i][0];
+					vec.y = laserScanData[i][1];
+					scanData.laser_data.push_back(vec);
+				}
+
+				_pubLaserScan.publish(scanData);
+			} laserScanMutex.unlock();
+
+			rate.sleep();
+		}
+	}
+
+	ros::Publisher getPublisher()
+	{
+		return _pubLaserScan;
+	}
+};
+
+
 // KINECT IMAGE view ==========================================================================================
 // make a pseudo color depth
 void
-makeDepthImage(Mat &inXyz, Mat &outImage, unsigned short minDepth, unsigned short maxDepth)
+perceptionSubscriber::makeDepthImage(Mat &inXyz, Mat &outImage, unsigned short minDepth, unsigned short maxDepth)
 {
 	if(outImage.rows != inXyz.rows || outImage.cols != inXyz.cols || outImage.dims != CV_8UC3) {
 		outImage = Mat::zeros(inXyz.rows, inXyz.cols, CV_8UC3);
@@ -106,7 +215,7 @@ makeDepthImage(Mat &inXyz, Mat &outImage, unsigned short minDepth, unsigned shor
 }
 
 // handle RGB Data. A callback function. Executed eack time a new pose message arrives.
-void poseMessageReceivedRGB(const sensor_msgs::Image& msg) {
+void perceptionSubscriber::poseMessageReceivedRGB(const sensor_msgs::Image& msg) {
 	ROS_INFO("seq = %d / width = %d / height = %d / step = %d", msg.header.seq, msg.width, msg.height, msg.step);
 	ROS_INFO("encoding = %s", msg.encoding.c_str());
 	//vector<unsigned char> data = msg.data;
@@ -118,7 +227,7 @@ void poseMessageReceivedRGB(const sensor_msgs::Image& msg) {
 }
 
 // handle Depth Data.  A callback function. Executed eack time a new pose message arrives.
-void poseMessageReceivedDepthRaw(const sensor_msgs::Image& msg) {
+void perceptionSubscriber::poseMessageReceivedDepthRaw(const sensor_msgs::Image& msg) {
 	ROS_INFO("seq = %d / width = %d / height = %d / step = %d", msg.header.seq, msg.width, msg.height, msg.step);
 	ROS_INFO("encoding = %s", msg.encoding.c_str());
 	//vector<unsigned char> data = msg.data;
@@ -138,7 +247,7 @@ void poseMessageReceivedDepthRaw(const sensor_msgs::Image& msg) {
 
 
 // KINECT LRF sensing =========================================================================================
-void drawImage(int rangeSize, vector<Vec2d> coord, float rangeMax)
+void perceptionSubscriber::drawImage(int rangeSize, vector<Vec2d> coord, float rangeMax)
 {
 	// draw the 'coord' in image plane
 	const int nImageSize = 801;
@@ -180,18 +289,17 @@ void drawImage(int rangeSize, vector<Vec2d> coord, float rangeMax)
 }
 
 // LRF 데이터 (레이져 센싱) callback
-void poseMessageReceivedLRF(const sensor_msgs::LaserScan& msg)
+void perceptionSubscriber::poseMessageReceivedLRF(const sensor_msgs::LaserScan& msg)
 {
 	// convert polar to Cartesian coordinate
 	vector<Vec2d> coord;
 	int nRangeSize = (int)msg.ranges.size();
-	bool needToDraw = true;
 
 	for(int i=0; i<nRangeSize; i++) {
 		double dRange = msg.ranges[i];
 
 		if(isnan(dRange)) {
-			if(needToDraw)
+			if(drawLRF)
 				coord.push_back(Vec2d(0., 0.));
 		} 
 		else{
@@ -206,8 +314,11 @@ void poseMessageReceivedLRF(const sensor_msgs::LaserScan& msg)
 			}
 		}
 	}
+	laserScanMutex.lock(); {
+		laserScanData = coord;
+	} laserScanMutex.unlock();
 
-	if(needToDraw) drawImage(nRangeSize, coord, msg.range_max);
+	if(drawLRF) drawImage(nRangeSize, coord, msg.range_max);
 }
 
 // KINECT LRF sensing END =====================================================================================
@@ -215,7 +326,7 @@ void poseMessageReceivedLRF(const sensor_msgs::LaserScan& msg)
 
 
 // TURTLEBOT Sensor ===========================================================================================
-void turtlebotSensorCallback(const kobuki_msgs::SensorState::ConstPtr& msg)
+void perceptionSubscriber::turtlebotSensorCallback(const kobuki_msgs::SensorState::ConstPtr& msg)
 {
 	int timeStamp = msg->time_stamp;
 	int bumper = msg->bumper;
@@ -235,7 +346,7 @@ void turtlebotSensorCallback(const kobuki_msgs::SensorState::ConstPtr& msg)
 //	int analogInput = msg->analog_input;
 }
 
-void imuCallback(const sensor_msgs::Imu::ConstPtr& imusmsg)
+void perceptionSubscriber::imuCallback(const sensor_msgs::Imu::ConstPtr& imusmsg)
 {
 	printf("Imu data\n");
 	printf("\tOrientation Data\n");  
@@ -295,22 +406,11 @@ int main(int argc, char **argv)
 {
 	// Initialize the ROS system
 	ros::init(argc, argv, "perception_node");
-	ros::NodeHandle nh;
+	
+	perceptionSubscriber* subscriber = new perceptionSubscriber();
 
-	// Create a subscriber object
-	ros::Subscriber subKinectRgb = nh.subscribe(
-		"/camera/rgb/image_color", 10, &poseMessageReceivedRGB
-	);
-	ros::Subscriber subKinectDetphRaw = nh.subscribe(
-		"/camera/depth_registered/image_raw", 10, &poseMessageReceivedDepthRaw
-	);
-	ros::Subscriber subKinectLRF = nh.subscribe(
-		"/scan", 10, &poseMessageReceivedLRF
-	);
-	ros::Subscriber subTurtlebotSensors = nh.subscribe(
-		"/mobile_base/sensors/core", 100, &turtlebotSensorCallback
-	);
-//	ros::Subscriber imu = n.subscribe("/mobile_base/sensors/imu_data", 1000, imuCallback);
+	perceptionPublisher* publisher = new perceptionPublisher();
+	publisher->publish();
 
 	// Let ROS take over
 	ros::spin();
