@@ -18,6 +18,7 @@ using namespace cv;
 
 bool drawLRF = true;
 vector<Vec2d> laserScanData;
+float rangeMax;
 boost::mutex laserScanMutex;
 
 // A template method to check 'nan'
@@ -116,6 +117,7 @@ public:
 					vec.y = laserScanData[i][1];
 					scanData.laser_data.push_back(vec);
 				}
+				scanData.rangeMax = rangeMax;
 
 				_pubLaserScan.publish(scanData);
 			} laserScanMutex.unlock();
@@ -316,6 +318,7 @@ void perceptionSubscriber::poseMessageReceivedLRF(const sensor_msgs::LaserScan& 
 	}
 	laserScanMutex.lock(); {
 		laserScanData = coord;
+		rangeMax = msg.range_max;
 	} laserScanMutex.unlock();
 
 	if(drawLRF) drawImage(nRangeSize, coord, msg.range_max);

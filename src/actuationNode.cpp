@@ -15,7 +15,7 @@
 boost::mutex mutex;
 nav_msgs::Odometry g_odom;
 
-const double maximumSpeed = 0.3;
+const double maximumSpeed = 0.5;
 const double minimumSpeed = 0.07;
 
 bool interrupt = false;
