@@ -1,0 +1,5 @@
+<launch>
+	<node name="perception_node" pkg="no_look_pass_robot" type="perception_node"/>
+	<node name="actuation_node" pkg="no_look_pass_robot" type="actuation_node" output="screen"/>
+	<node name="cognition_node" pkg="no_look_pass_robot" type="cognition_node" output="screen"/>
+</launch>

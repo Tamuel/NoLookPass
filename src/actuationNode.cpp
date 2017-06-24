@@ -116,7 +116,7 @@ bool moveToRelativeLocation(
 		backward = -1;
 
 	// Start moving
-	printf("Start move to relative location : [%f, %f]\n", relativeX, relativeY);
+	printf("Actuation Node : [%6.3f, %6.3f]\n", relativeX, relativeY);
 	interrupt = false;
 
 	while(ros::ok() && !bDone) {
@@ -235,7 +235,7 @@ public:
 		
 		// Decleation of subscriber
 		_sub_odom = _nh.subscribe("/odom", 100, &actuationSubscriber::odomMsgCallback, this);
-		_sub_move = _movenh.subscribe("/move_msg", 1, &actuationSubscriber::moveMsgCallback, this);
+		_sub_move = _movenh.subscribe("/move_msg", 10, &actuationSubscriber::moveMsgCallback, this);
 	}
 	
 	void subscribe()

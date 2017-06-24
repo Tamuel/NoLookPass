@@ -102,7 +102,7 @@ public:
 
 	void publish()
 	{
-		ros::Rate rate(10);
+		ros::Rate rate(3);
 
 		while(ros::ok())
 		{
