@@ -1,0 +1,4 @@
+Header header
+uint8[] depth
+uint32 height
+uint32 width

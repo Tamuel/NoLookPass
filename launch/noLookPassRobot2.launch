@@ -1,0 +1,6 @@
+<launch>
+	<node name="perception_node" pkg="no_look_pass_robot" type="perception_node"/>
+	<node name="masterPosition_node" pkg="no_look_pass_robot" type="masterPosition_node" output="screen"/>
+	<node name="masterRouteEstimation_node" pkg="no_look_pass_robot" type="masterRouteEstimation_node" output="screen"/>
+	<node name="cognition_node" pkg="no_look_pass_robot" type="cognition_node" output="screen"/>
+</launch>

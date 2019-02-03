@@ -1,0 +1,499 @@
+#include <ros/ros.h>
+#include <no_look_pass_robot/move.h>
+#include <no_look_pass_robot/laserScan.h>
+#include <opencv/cv.h>
+#include <opencv/highgui.h>
+#include <cv_bridge/cv_bridge.h>
+#include <iomanip>
+#include <stdlib.h>
+#include <signal.h>
+
+using namespace cv;
+
+enum windowState {FREE, BLOCK, VISIT};
+enum coord {X, Y};
+
+struct movePosition
+{
+	double x;
+	double y;
+};
+typedef struct movePosition movePos;
+
+const int nImageHSize = 801;
+const int nImageVSize = nImageHSize/2;
+const int nAxisSize = nImageHSize/16;
+
+// 계산 편의를 위해 window 갯수, robot의 window 갯수는 짝수가 되도록 설정해야함
+const int windowSize = 20;
+const int robotSize = 40;
+const int scanLength = 7; // Number of windows
+
+// Shared data by subscriber and publisher
+no_look_pass_robot::move move_msg;
+
+short **windows;
+
+class obstacleDetector
+{
+private:
+	int windowWidth;
+	int windowHeight;
+
+	int imageCenterCooordX;
+	int imageCenterCooordY;
+	Mat image;
+
+	int robotWindowIndex;
+	int nRobotWindows;
+	bool windowWidthEven;
+
+
+public:
+	obstacleDetector()
+	{
+		windowWidth = nImageHSize/windowSize;
+		windowHeight = nImageVSize/windowSize;
+
+		windows = new short* [windowWidth];
+		for(int i = 0; i < windowWidth; i++)
+			windows[i] = new short[windowHeight];
+
+		imageCenterCooordX = nImageVSize;
+		imageCenterCooordY = nImageVSize;
+
+		robotWindowIndex = imageCenterCooordX / windowSize;
+		nRobotWindows = robotSize / windowSize;
+		nRobotWindows += (robotSize / windowSize - (float)nRobotWindows) > 0.5 ? 1 : 0; // 반올림 
+
+		if(windowWidth % 2 == 0)
+			windowWidthEven = true;
+		else
+			windowWidthEven = false;
+
+		obstacleDetector::clearImage();
+	}
+	
+	~obstacleDetector()
+	{
+		for(int i = 0; i < windowWidth; i++)
+			free(windows[i]);
+		free(windows);
+	}
+
+	void clearImage();
+	void clearWindows();
+	void makeWindows(no_look_pass_robot::laserScan coord, float rangeMax);
+	void drawWindows();
+	void showImage();
+	void avoidObstacles(float destinationX, float destinationY);
+	bool detectObstacles(int xIndex, int yIndex, int *detectWinXIndex, int *detectWinYIndex);
+};
+
+void obstacleDetector::clearImage()
+{
+	for(int i = 0; i < windowWidth; i++)
+		for(int j = 0; j < windowHeight; j++)
+			windows[i][j] = FREE;
+}
+
+void obstacleDetector::clearWindows()
+{
+	image = Mat::zeros(nImageVSize, nImageHSize, CV_8UC3);
+}
+
+void obstacleDetector::makeWindows(no_look_pass_robot::laserScan coord, float rangeMax)
+{
+	// Calculate windows
+	for(int i = 0; i < coord.laser_data.size(); i++)
+	{
+		int x_coord =
+			imageCenterCooordX + cvRound((coord.laser_data[i].x / rangeMax) * nImageHSize);
+		int y_coord =
+			0 + cvRound((coord.laser_data[i].y / rangeMax) * nImageHSize);
+
+		if(x_coord >= 0 && x_coord < nImageHSize && y_coord >= 0 && y_coord < nImageVSize)
+		{
+			int windowXindex = x_coord / windowSize;
+			int windowYindex = y_coord / windowSize;
+			if(windows[windowXindex][windowYindex] == FREE)
+				windows[windowXindex][windowYindex] = BLOCK;
+		}
+	}
+
+	for(int i = 0; i < windowHeight; i++)
+	{
+		for(int j = 0; j < i - 1; j++)
+		{
+			windows[j][windowHeight - i - 2] = BLOCK;
+			windows[windowWidth - 1 - j][windowHeight - i - 2] = BLOCK;
+		}
+	}
+	windows[robotWindowIndex][0] = FREE;
+}
+
+void obstacleDetector::drawWindows()
+{
+	// Draw windows
+	for(int i = 0; i < windowHeight; i++)
+	{
+		for(int j = 0; j < windowWidth; j++)
+		{
+			Scalar color;
+			switch(windows[j][i])
+			{
+				case FREE:
+					color = Scalar(255, 255, 255);
+				break;
+
+				case BLOCK:
+					color = Scalar(0, 0, 0);
+				break;
+
+				case VISIT:
+					color = Scalar(120, 120, 120);
+				break;
+				
+			}
+			rectangle(
+				image,
+				Point(j * windowSize, i * windowSize),
+				Point((j + 1) * windowSize, (i + 1) * windowSize),
+				color, CV_FILLED
+			);
+		}
+	}
+}
+
+void obstacleDetector::showImage()
+{
+
+	// image coordinate transformation
+	flip(image, image, 0);
+
+	imshow("Kinect LRF Preview", image);
+	waitKey(30);
+}
+
+bool obstacleDetector::detectObstacles(int xIndex, int yIndex, int *detectWinXIndex, int *detectWinYIndex)
+{
+	for(int j = -nRobotWindows / 2 + 1;  j <= nRobotWindows / 2; j++)
+	{
+		for(int k = -nRobotWindows / 2; k < nRobotWindows / 2; k++)
+		{
+			if(xIndex + k >= 0 && xIndex + k < windowWidth && yIndex >= 0 && yIndex < windowHeight)
+			{
+				if(windows[xIndex + k][yIndex + j] == BLOCK)
+				{
+					*detectWinXIndex = xIndex + k;
+					*detectWinYIndex = yIndex + j;
+					return true;
+				}
+				else
+				{
+					// Check visit
+					windows[xIndex + k][yIndex + j] = VISIT;
+					rectangle(
+						image,
+						Point(xIndex * windowSize, yIndex * windowSize),
+						Point((xIndex + 1) * windowSize, (yIndex + 1) * windowSize),
+						Scalar(120, 120, 120), CV_FILLED
+					);
+				}
+			}
+		}
+	}
+	return false;
+}
+
+void obstacleDetector::avoidObstacles(float destinationX, float destinationY)
+{
+/*	float moveXweight = 0;
+	float moveYweight = 0;
+	float xWeightScale = 60; // Larger than turn less
+	float yWeightScale = 2; // Larger than turn less
+	int forwardScan = 1;
+
+	for(int j = -scanHalfWidth; j < scanHalfWidth + (windowWidthEven ? 0 : 1); j++)
+	{
+		int i;
+		for(i = forwardScan; i < scanLength + forwardScan; i++)
+		{
+			// Detect Obstacles
+			if(windows[robotWindowIndex + j][i])
+			{
+				moveXweight +=
+					-(float)((scanHalfWidth / (j + (windowWidthEven ? (j >= 0 ? 1 : 0) : 0))) *
+					 (scanLength - i) / yWeightScale) / xWeightScale;
+				break; 
+			}
+			else
+			{
+				rectangle(
+					image,
+					Point((robotWindowIndex + j) * windowSize, i * windowSize),
+					Point((robotWindowIndex + j + 1) * windowSize, (i + 1) * windowSize),
+					Scalar(150, 150, 150), CV_FILLED
+				);
+			}
+		}
+		moveYweight += i;
+	}
+
+	moveYweight /= (2 * scanHalfWidth * scanLength);
+	moveYweight -= 0.5;
+	moveYweight *= 2;
+	if(moveYweight < 0.08 && moveYweight > -0.08)
+		moveXweight = -2.0;
+*/
+
+	// Set Destination Window and make path =========================================
+	float slope = (destinationX != 0 ? destinationY : 9999) / ((destinationX != 0) ? destinationX : 1);
+	int desWinXIndex = 0;
+	int desWinYIndex = 0;
+	float halfWindowSize = windowSize / 2;
+	srand(time(NULL));
+	
+
+	// Calculate Destination window
+	// 각 윈도우의 중심 좌표를 이용해 계산
+	if(fabs(slope) > (float)(nImageHSize / 2) / (float)nImageVSize)
+	{
+		// When destination window in top column
+		float topMostY = (scanLength * windowSize - halfWindowSize);
+		float xPos = (slope == 0) ? 9999 : (topMostY / slope);
+		desWinXIndex = xPos / windowSize + robotWindowIndex;
+		desWinYIndex = windowHeight - 1;
+	}
+	else
+	{
+		// When destination window in sidemost row
+		float sideMostX;
+		if(slope < 0)
+			sideMostX = halfWindowSize;
+		else
+			sideMostX = (windowWidth * windowSize - halfWindowSize);
+		float yPos = slope * (sideMostX - nImageHSize / 2);
+		desWinXIndex = sideMostX / windowSize;
+		desWinYIndex = yPos / windowSize;
+	}
+	printf("des X, Y : %d, %d\n", desWinXIndex, desWinYIndex);
+	
+	// Calculate path
+	vector<Vec2d> vertex;
+	Vec2d startPos;
+	startPos[X] = robotWindowIndex; startPos[Y] = 0;
+	vertex.push_back(startPos);
+	float avoidSlope = (desWinXIndex - vertex.back()[X] == 0) ?
+		9999 :
+		(desWinYIndex - vertex.back()[Y]) / (desWinXIndex - vertex.back()[X]);
+	float detectSlope;
+	int cXIndex;
+	bool detectObstacle = false;
+	int detectWinXIndex;
+	int detectWinYIndex;
+	int newWinXIndex;
+	int newWinYIndex;
+
+	for(int cYIndex = 0; cYIndex < scanLength; cYIndex++)
+	{
+		cXIndex = (avoidSlope == 0) ?
+			vertex.back()[X] :
+			((float)(cYIndex * windowSize - halfWindowSize) / avoidSlope) / windowSize +
+			vertex.back()[X];
+		if(cXIndex < 0 || cXIndex >= windowWidth)
+			break;
+
+		detectObstacle = detectObstacles(cXIndex, cYIndex, &detectWinXIndex, &detectWinYIndex);
+
+		// Obstacle Detection
+		if(detectObstacle)
+		{
+			rectangle(
+				image,
+				Point(detectWinXIndex * windowSize, detectWinYIndex * windowSize),
+				Point((detectWinXIndex + 1) * windowSize, (detectWinYIndex + 1) * windowSize),
+				Scalar(255, 0, 255), CV_FILLED
+			);
+			detectSlope = (avoidSlope == 0) ? 9999 : (- 1 / avoidSlope);
+			printf("De Slope : %f\n", detectSlope);
+			bool leftAndRight;
+			bool detectNewWay = false;
+			short range = 0;
+			int newWayXIndex = 0;
+			int newWayYIndex = 0;
+			if(move_msg.relativeY > 0)//if(detectWinXIndex > desWinXIndex)
+				leftAndRight = true; // left first
+			else
+				leftAndRight = false; // right first
+			while(!(detectWinXIndex + range >= windowWidth && detectWinXIndex - range < 0))
+			{
+				range++;
+				printf("Range! : %d\n", range);
+				for(int i = 0; i < 2; i++)
+				{
+					short _range;
+					if(leftAndRight)
+						_range = -range;
+					else
+						_range = range;
+					leftAndRight = !leftAndRight;
+
+					newWinXIndex = detectWinXIndex + _range;
+
+					if(newWinXIndex >= 0 && newWinXIndex < windowWidth)
+					{
+						newWinYIndex = detectSlope * (_range * windowSize + halfWindowSize) / windowSize +
+							detectWinYIndex;
+						if(newWinYIndex >= 0 && newWinYIndex < windowHeight)
+						{
+							if(!detectObstacles(newWinXIndex, newWinYIndex, &newWayXIndex, &newWayYIndex))
+							{
+								vertex.push_back(Vec2d(newWinXIndex, newWinYIndex));
+								detectNewWay = true;
+								avoidSlope = (desWinXIndex - vertex.back()[X] == 0) ?
+								9999 :
+								(desWinYIndex - vertex.back()[Y]) / (desWinXIndex - vertex.back()[X]);
+								rectangle(
+									image,
+									Point(newWinXIndex * windowSize, newWinYIndex * windowSize),
+									Point((newWinXIndex + 1) * windowSize, (newWinYIndex + 1) * windowSize),
+									Scalar(0, 0, 255), CV_FILLED
+								);
+								break;
+							}
+						}
+					}
+
+					printf("New Window : %d, %d, %d\n", newWinXIndex, newWinYIndex, _range);
+				}
+				if(detectNewWay) break;
+			}
+		}
+		else
+		{
+			rectangle(
+				image,
+				Point(cXIndex * windowSize, cYIndex * windowSize),
+				Point((cXIndex + 1) * windowSize, (cYIndex + 1) * windowSize),
+				Scalar(120, 120, 120), CV_FILLED
+			);
+		}
+	}
+
+	if(vertex.size() == 1)
+		vertex.push_back(Vec2d(desWinXIndex, desWinYIndex));
+
+	// Draw Destination	
+	rectangle(
+		image,
+		Point(vertex[1][0] * windowSize, vertex[1][1] * windowSize),
+		Point((vertex[1][0] + 1) * windowSize, (vertex[1][1] + 1) * windowSize),
+		Scalar(0, 255, 255), CV_FILLED
+	);
+	printf("des %d, %d\n", (int)vertex[1][0] - robotWindowIndex, (int)vertex[1][1]);
+
+	move_msg.relativeX = (vertex[1][1] - 1.2) / 5;
+	move_msg.relativeY = -((vertex[1][0] - robotWindowIndex - 0.5f) / 8);
+
+	printf("Cognition Node : [%6.3f, %6.3f]\n", move_msg.relativeX, move_msg.relativeY);
+}
+
+
+
+class cognitionSubscriber
+{
+private:
+	ros::NodeHandle _nh;
+	ros::Subscriber _subLaserScan;
+	obstacleDetector* detector;
+
+public:
+	cognitionSubscriber()
+	{
+		_subLaserScan = _nh.subscribe(
+			"/laser_scan", 10, &cognitionSubscriber::getLaserScanData, this
+		);
+		detector = new obstacleDetector();
+	}
+
+	void getLaserScanData(const no_look_pass_robot::laserScan& laserScanData);
+
+};
+
+void cognitionSubscriber::getLaserScanData(const no_look_pass_robot::laserScan& laserScanData)
+{
+
+/*	for(int i = 0; i < laserScanData.laser_data.size(); i++)
+	{
+		printf("[%5.2lf,%5.2lf] ",
+			laserScanData.laser_data[i].x, laserScanData.laser_data[i].y); 
+		if(i != 0 && i % 5 == 0)
+			printf("\n");
+	}
+*/
+
+	detector->clearImage();
+	detector->clearWindows();
+	detector->makeWindows(
+		laserScanData,
+		laserScanData.rangeMax
+	);
+	detector->drawWindows();
+	detector->avoidObstacles(0, 4);
+	detector->showImage();
+}
+
+
+class cognitionPublisher
+{
+private:
+	ros::NodeHandle _nh;
+	ros::Publisher _pub;
+
+public:
+	cognitionPublisher()
+	{
+		_pub = _nh.advertise<no_look_pass_robot::move>("/move_msg", 100, this);
+	}
+
+	void publish();
+};
+
+void cognitionPublisher::publish()
+{
+	ros::Rate rate(10);
+
+	while(ros::ok())
+	{
+		ros::spinOnce();
+		_pub.publish(move_msg);
+		rate.sleep();
+	}
+}
+
+void sig_handler(int sig)
+{
+	printf("\n\nCtrl C!!!\n\n");	
+	for(int i = 0; i < sizeof(**windows) / sizeof(*windows); i++)
+		free(windows[i]);
+	free(windows);
+	ros::shutdown();
+}
+
+int main(int argc, char **argv)
+{
+	ros::init(argc, argv, "cognition_node");
+	
+	move_msg.relativeX = 0;
+	move_msg.relativeY = 0;
+
+	cognitionSubscriber* subscriber = new cognitionSubscriber();
+	cognitionPublisher* publisher = new cognitionPublisher();
+
+	signal(SIGINT, sig_handler);
+
+	publisher->publish();
+
+	return 0;
+}

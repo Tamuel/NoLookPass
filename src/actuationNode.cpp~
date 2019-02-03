@@ -15,29 +15,10 @@
 boost::mutex mutex;
 nav_msgs::Odometry g_odom;
 
-const double maximumSpeed = 0.3;
+const double maximumSpeed = 0.2;
 const double minimumSpeed = 0.07;
 
-
-// Get Odometry Callback function
-void
-odomMsgCallback(const nav_msgs::Odometry &msg)
-{
-	// receive a '/odom' message with the mutex
-	mutex.lock(); {
-		g_odom = msg;
-	} mutex.unlock();
-}
-
-// Get Move Message callback function
-void
-moveMsgCallback(const no_look_pass_robot::move &msg)
-{
-	double relativeX = msg.relativeX;
-	double relativeY = msg.relativeY;
-}
-
-
+bool interrupt = false;
 
 // odom
 tf::Transform
@@ -108,20 +89,19 @@ getInitialTransformation(void)
 // 터틀봇의 좌표계를 기준으로 (relativeX, relativeY) 좌표로 이동. 터틀봇의 시점에서 생각 필요
 bool moveToRelativeLocation(
 	ros::Publisher &pubTeleop,
-	tf::Transform &initialTransformation,
 	double relativeX,
 	double relativeY,
 	double dTranslationSpeed,
 	double dRotationSpeed
 	)
 {
+	tf::Transform initialTransformation = getInitialTransformation();
 	geometry_msgs::Twist baseCmd;
 	baseCmd.linear.x = dTranslationSpeed;
 	baseCmd.linear.y = 0.0;
 	bool bDone = false;
 	ros::Rate loopRate(1000.0);
 
-	double dRotation;
 	double backward = 1;
 
 	// get current transformation
@@ -130,10 +110,14 @@ bool moveToRelativeLocation(
 	tf::Transform relativeTransformation;
 	tf::Quaternion rotationQuat;
 
-	if(relativeX > 0)
+	if(relativeX >= 0)
 		backward = 1;
 	else
 		backward = -1;
+
+	// Start moving
+	printf("Start move to relative location : [%f, %f]\n", relativeX, relativeY);
+	interrupt = false;
 
 	while(ros::ok() && !bDone) {
 		ros::spinOnce();
@@ -152,17 +136,20 @@ bool moveToRelativeLocation(
 			(1-(2 * (rotationQuat[2] * rotationQuat[2])
 			))
 		);
-		dRotation = atan2(
+		double dRotation = atan2(
 			(relativeY - relativeTransformation.getOrigin().getY()) * backward,
 			(relativeX - relativeTransformation.getOrigin().getX()) * backward
 		);
-		printf("Rota : %f, Move : %f, Rot : %f, Angle : %f\n", toDegree(dRotation - dAngleTurned), dHaveToMoveDist,
-		dRotation, dAngleTurned);
+//		printf("Rota : %f, Move : %f, Rot : %f, Angle : %f\n",
+//			toDegree(dRotation - dAngleTurned), dHaveToMoveDist,
+//			dRotation, dAngleTurned);
 
 		double haveToRotate = dRotation - dAngleTurned;
-		if(dHaveToMoveDist < 0.05) 
+		if(dHaveToMoveDist < 0.05 || interrupt) 
 		{
 			bDone = true;
+			interrupt = true;
+			printf("Move Done!\n");
 			break;
 		} else {
 			if(haveToRotate < 0)
@@ -176,6 +163,7 @@ bool moveToRelativeLocation(
 				baseCmd.linear.x = minimumSpeed * backward;
 			if(baseCmd.linear.x * backward > maximumSpeed)
 				baseCmd.linear.x = maximumSpeed * backward;
+
 			//send the drive command
 			pubTeleop.publish(baseCmd);
 
@@ -193,28 +181,87 @@ bool moveToRelativeLocation(
 	return bDone;
 }
 
+class actuationPublisher
+{
+private:
+	ros::NodeHandle _nh;
+	ros::Publisher _pub_teleop;
+
+public:
+	actuationPublisher()
+	{
+		_pub_teleop = _nh.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/teleop", 100, this);
+
+	}
+	
+	ros::Publisher getPublisher()
+	{
+		return _pub_teleop;
+	}
+};
+
+class actuationSubscriber
+{
+private:
+	ros::NodeHandle _nh;
+	ros::NodeHandle _movenh;
+	ros::Subscriber _sub_odom;
+	ros::Subscriber _sub_move;
+	actuationPublisher* _publisher;
+
+	
+	// Get Odometry Callback function
+	void odomMsgCallback(const nav_msgs::Odometry &msg)
+	{
+		// receive a '/odom' message with the mutex
+		mutex.lock(); {
+			g_odom = msg;
+		} mutex.unlock();
+	}
+
+	// Get Move Message callback function
+	void moveMsgCallback(const no_look_pass_robot::move &msg)
+	{
+		double relativeX = msg.relativeX;
+		double relativeY = msg.relativeY;
+		ros::Publisher _pub = _publisher->getPublisher();
+		moveToRelativeLocation(_pub, relativeX, relativeY, 0.1, 0.5);
+	}
+
+public:
+	actuationSubscriber(actuationPublisher* publisher)
+	{
+		_publisher = publisher;
+		
+		// Decleation of subscriber
+		_sub_odom = _nh.subscribe("/odom", 100, &actuationSubscriber::odomMsgCallback, this);
+		_sub_move = _movenh.subscribe("/move_msg", 100, &actuationSubscriber::moveMsgCallback, this);
+	}
+	
+	void subscribe()
+	{
+		ros::Rate rate (30);
+		while(ros::ok())
+		{
+			ros::spinOnce();
+			rate.sleep();
+		}
+	}
+};
+
+
 
 int main(int argc, char **argv)
 {
 	ros::init(argc, argv, "actuation_node");
 
-	// Ros initialization
-	ros::NodeHandle nhp, nhs;
-
-	// Decleation of subscriber
-	ros::Subscriber sub = nhs.subscribe("/odom", 100, &odomMsgCallback);
-	ros::Subscriber subMoveMsg = nhs.subscribe("move_msg", 100, &moveMsgCallback);
-
 	// Create a publisher object
-	ros::Publisher pub = nhp.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/teleop", 100);
+	actuationPublisher* publisher = new actuationPublisher();
 
-	// exception
-	if(argc != 3) {
-		printf(">> rosrun knu_ros_lecture turtle_position_move [relative_x] [relative_y]\n");
-		return 1;
-	}
+	// Create a subscriber object
+	actuationSubscriber* subscriber = new actuationSubscriber(publisher);
+	subscriber->subscribe();
 
-	tf::Transform initialTransformation = getInitialTransformation();
-	moveToRelativeLocation(pub, initialTransformation, atof(argv[1]), atof(argv[2]), 0.1, 0.5);
+
 	return 0;
 }

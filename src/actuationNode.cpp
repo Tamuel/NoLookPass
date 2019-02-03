@@ -9,13 +9,11 @@
 #define toRadian(degree)	((degree) * (M_PI / 180.))
 #define toDegree(radian)	((radian) * (180. / M_PI))
 
-
-
 // Global variable
 boost::mutex mutex;
 nav_msgs::Odometry g_odom;
 
-const double maximumSpeed = 0.5;
+const double maximumSpeed = 0.2;
 const double minimumSpeed = 0.07;
 
 bool interrupt = false;
@@ -116,7 +114,7 @@ bool moveToRelativeLocation(
 		backward = -1;
 
 	// Start moving
-	printf("Actuation Node : [%6.3f, %6.3f]\n", relativeX, relativeY);
+	printf("Start move to relative location : [%f, %f]\n", relativeX, relativeY);
 	interrupt = false;
 
 	while(ros::ok() && !bDone) {
@@ -235,12 +233,12 @@ public:
 		
 		// Decleation of subscriber
 		_sub_odom = _nh.subscribe("/odom", 100, &actuationSubscriber::odomMsgCallback, this);
-		_sub_move = _movenh.subscribe("/move_msg", 10, &actuationSubscriber::moveMsgCallback, this);
+		_sub_move = _movenh.subscribe("/move_msg", 100, &actuationSubscriber::moveMsgCallback, this);
 	}
 	
 	void subscribe()
 	{
-		ros::Rate rate (30);
+		ros::Rate rate (100); // 10
 		while(ros::ok())
 		{
 			ros::spinOnce();
